@@ -1402,6 +1402,8 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
         selected: AvailableModel | None
         if model is None or isinstance(model, AvailableModel):
             selected = model
+            if selected is None and temporary and self._model_registry:
+                selected = next(iter(self._model_registry.values()))
         elif isinstance(model, str):
             selected = self._resolve_model_by_name(model)
         elif isinstance(model, dict):
@@ -1489,6 +1491,9 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 inner_req_list[41] = [1]
                 if temporary:
                     inner_req_list[TEMPORARY_CHAT_FLAG_INDEX] = 1
+                    inner_req_list[68] = 2
+                else:
+                    inner_req_list[68] = 1
                 if deep_research:
                     inner_req_list[49] = 1
                 inner_req_list[53] = 0
@@ -1496,7 +1501,6 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     inner_req_list[54] = [[[[[1]]]]]
                     inner_req_list[55] = [[1]]
                 inner_req_list[61] = []
-                inner_req_list[68] = 1
                 inner_req_list[79] = 1
                 inner_req_list[80] = 2 if extended_thinking else 1
 
@@ -1510,8 +1514,16 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     model_number = model_header[-1] if model_header else None
                     if isinstance(model_number, int):
                         inner_req_list[79] = model_number
-                    model_header.append(2 if extended_thinking else 1)
-                    model_header.append(self._sessionid)
+                    if temporary:
+                        if len(model_header) > 7:
+                            model_header[7] = 1
+                        model_header.append(1)  # [15]: temporary flag
+                        model_header.append(uuid_val)  # [16]: client UUID
+                        model_header.append(None)  # [17]
+                        model_header.append(None)  # [18]
+                    else:
+                        model_header.append(2 if extended_thinking else 1)
+                        model_header.append(self._sessionid)
                     model_headers[MODEL_HEADER_KEY] = json.dumps(model_header).decode("utf-8")
 
                 request_headers = {
