@@ -1566,8 +1566,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
                     last_progress_time: float = time.time()
-
-                    is_thinking = False
+                    is_thinking = True if extended_thinking else False
                     is_queueing = False
                     has_candidates = False
                     is_completed = False  # Check if this conversation turn has been fully answered.
