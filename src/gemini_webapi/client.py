@@ -1229,23 +1229,49 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 "last_texts": {},
                 "last_thoughts": {},
             }
-            output = None
-            async for chunk in self._generate(
-                prompt=prompt,
-                req_file_data=file_data,
-                model=model,
-                gem=gem,
-                chat=chat,
-                temporary=temporary,
-                session_state=session_state,
-                deep_research=deep_research,
-                extended_thinking=extended_thinking,
-                **kwargs,
-            ):
-                output = chunk
+            max_error_card_retries = 3
+            last_error_output = None
 
-            if output is None:
-                raise GeminiError("Failed to generate contents. No output data found in response.")
+            for retry_attempt in range(max_error_card_retries + 1):
+                output = None
+                async for chunk in self._generate(
+                    prompt=prompt,
+                    req_file_data=file_data,
+                    model=model,
+                    gem=gem,
+                    chat=chat,
+                    temporary=temporary,
+                    session_state=session_state,
+                    deep_research=deep_research,
+                    extended_thinking=extended_thinking,
+                    **kwargs,
+                ):
+                    output = chunk
+
+                if output is None:
+                    raise GeminiError("Failed to generate contents. No output data found in response.")
+
+                has_error_card = any(
+                    getattr(cand, "is_error_card", False) for cand in output.candidates
+                )
+                if has_error_card:
+                    last_error_output = output
+                    if retry_attempt < max_error_card_retries:
+                        logger.warning(
+                            f"Google returned transient error card. Retrying attempt {retry_attempt + 1}/{max_error_card_retries}..."
+                        )
+                        await asyncio.sleep(1.0)
+                        continue
+                    else:
+                        logger.warning(
+                            "Google returned transient error card after maximum retries. Returning last error message."
+                        )
+                        break
+                else:
+                    break
+
+            if output is None and last_error_output is not None:
+                output = last_error_output
 
             if isinstance(chat, ChatSession):
                 output.metadata = chat.metadata
@@ -1689,6 +1715,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                                 generated_videos,
                                                 generated_media,
                                                 citations,
+                                                is_error_card,
                                             ) = self._parse_candidate(
                                                 candidate_data, cid, rid, rcid
                                             )
@@ -1820,6 +1847,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                                     citations=citations,
                                                     deep_research_plan=deep_research_plan,
                                                     deep_research_document=deep_research_document,
+                                                    is_error_card=is_error_card,
                                                 )
                                             )
 
@@ -2114,9 +2142,12 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 - citations: Web sources resolving the `[cite: N]` markers in the text.
 
         """
-        text = get_nested_value(candidate_data, [1, 0], "")
-        if CARD_CONTENT_RE.match(text):
-            text = get_nested_value(candidate_data, [22, 0]) or text
+        raw_text = get_nested_value(candidate_data, [1, 0], "")
+        is_error_card = bool(CARD_CONTENT_RE.match(raw_text))
+        if is_error_card:
+            text = get_nested_value(candidate_data, [22, 0]) or raw_text
+        else:
+            text = raw_text
 
         # Cleanup googleusercontent artifacts
         text = ARTIFACTS_RE.sub("", text)
@@ -2240,6 +2271,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             generated_videos,
             generated_media,
             citations,
+            is_error_card,
         )
 
     async def _get_full_size_image(
