@@ -32,6 +32,9 @@ dev = ["pyright", "ruff", "ty"]
 [dependency-groups]
 dev = [
   "gemini-webapi[browser,dev]", # browser extra keeps the optional import type-checkable
+  "lizard>=1.24.0",
+  "playwright>=1.63.0",
+  "python-dotenv>=1.2.4",
 ]
 
 [project.urls]
