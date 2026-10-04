@@ -207,3 +207,6 @@ temp/
 # Cookies and credentials
 cookies.json
 *.cookies
+
+# Generated test artifacts
+output_images/
