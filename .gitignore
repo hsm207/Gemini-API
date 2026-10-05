@@ -210,3 +210,6 @@ cookies.json
 
 # Generated test artifacts
 output_images/
+
+# Error-card corpus: trimmed-away runs kept on disk only, not part of the corpus
+tests/scratch/errorcard/runs_trimmed/

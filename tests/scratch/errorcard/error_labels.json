@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "Ground truth for the error-card corpus, labelled by READING each response's",
+    "final text. This file is the oracle: it was derived by human inspection of",
+    "what the model actually said, not by any detection heuristic.",
+    "",
+    "A run is an error only when the model refused/failed the request instead of",
+    "answering it. Short is not the signal -- batch_03/run03, run07, run13 and",
+    "run19 are 65-char legitimate permission replies, batch_04/run06 is a 294-char",
+    "search tool call, and most batch_04 responses are JSON tool payloads. All clean.",
+    "",
+    "batch_04 added two errors, both arriving with NO prior answer (single frame),",
+    "which is the shape PayloadCollapseRule cannot see."
+  ],
+  "errors": {
+    "batch_01/run07.bin": "I encountered an error doing what you asked. Could you try again?",
+    "batch_02/run01.bin": "I'm having a hard time fulfilling your request. Can I help you with something else instead?",
+    "batch_03/run01.bin": "I'm having a hard time fulfilling your request. Can I help you with something else instead?",
+    "batch_03/run04.bin": "I seem to be encountering an error. Can I try something else for you?",
+    "batch_03/run05.bin": "Sorry, something went wrong. Please try your request again.",
+    "batch_04/run02.bin": "I seem to be encountering an error. Can I try something else for you?",
+    "batch_04/run03.bin": "I encountered an error doing what you asked. Could you try again?"
+  },
+  "clean_examples": {
+    "batch_03/run03.bin": "Sure. First, I'll need your permission to turn on the Linear app. (65 chars, legitimate)",
+    "batch_03/run18.bin": "JSON tool_call payload (334 chars, legitimate)",
+    "batch_03/run11.bin": "JSON tool_call payload (209 chars, legitimate)"
+  }
+}
