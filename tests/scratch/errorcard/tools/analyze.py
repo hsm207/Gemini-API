@@ -1,13 +1,13 @@
 """Corpus reporting for the captured StreamGenerate responses.
 
-Reports sizes, payload counts, text lengths, and which detection rules fired.
+Reports sizes, payload counts, text lengths, and which detection signals fired.
 
-Classification is delegated entirely to anomaly_detector; this module holds no
-opinion of its own. An earlier version classified by scanning for known message
-substrings, but that list missed 3 of the 5 real errors in this corpus, so it
-was removed rather than kept as a cross-check.
+Classification is delegated entirely to gemini_webapi.error_card - the same
+module client.py uses, so this report can never disagree with the library. This
+module used to delegate to a scratch copy of the rules instead; that copy was a
+second implementation of the same idea and has been deleted.
 
-Offline only - no network, no library import.
+Offline only - no network. Imports the library from the repo's src/.
 
     python analyze.py
 """
@@ -16,10 +16,15 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from anomaly_detector import StreamAnomalyDetector
-
-DETECTOR = StreamAnomalyDetector()
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "..", "src"))
+from gemini_webapi.error_card import (  # noqa: E402
+    error_summary,
+    is_error_card,
+    is_rejected,
+    matches_known_message,
+)
 
 
 def frames(body):
@@ -81,18 +86,6 @@ def text_len(pl):
     return best
 
 
-def _rule_name(result):
-    """Short rule label, e.g. 'TextBlockFlag' from its diagnostic."""
-    message = result.diagnostic_message or ""
-    if "rejection flag" in message:
-        return "TextBlockFlag"
-    if "replaced, not extended" in message:
-        return "PayloadCollapse"
-    if "known error message" in message:
-        return "ExplicitMessage"
-    return type(result).__name__
-
-
 def analyse(path):
     body = open(path, "rb").read().decode("utf-8", "replace")
     pls = list(payloads(body))
@@ -107,20 +100,34 @@ def analyse(path):
         if ln and ln < peak:
             shrink.append((i, peak, ln))
         peak = max(peak, ln)
-    # Classification is delegated to anomaly_detector, the single source of
-    # truth for "is this an error".
-    verdict = DETECTOR.detect(body)
-    return {"file": os.path.relpath(path, os.path.dirname(__file__)).replace("\\", "/"),
+    # Classification is delegated to gemini_webapi.error_card, the single
+    # source of truth for "is this an error". The per-text loop mirrors
+    # _verify_module.py so the report and the test can never disagree.
+    signals, reasons, detected = set(), [], False
+    for pl in pls:
+        texts = [c[1][0] if len(c) > 1 and isinstance(c[1], list) and c[1] else ""
+                 for c in candidates(pl)]
+        if is_rejected(pl):
+            signals.add("RejectionFlag")
+        for text in texts:
+            if matches_known_message(text):
+                signals.add("KnownMessage")
+            if is_error_card(pl, text):
+                detected = True
+        reason = error_summary(pl, texts[-1] if texts else None)
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return {"file": os.path.relpath(path, os.path.join(HERE, "..")).replace("\\", "/"),
             "bytes": len(body),
-            "is_error": verdict.has_error,
-            "rules": [_rule_name(r) for r in DETECTOR.detect_all(body)],
+            "is_error": detected,
+            "signals": sorted(signals), "reasons": reasons,
             "n_payloads": len(pls), "slots": sorted(nz), "max_text": max(lens or [0]),
             "shrinks": shrink}
 
 
 def run_files():
   """All captured responses, across every batch directory."""
-  root = os.path.join(os.path.dirname(__file__), "runs")
+  root = os.path.join(os.path.dirname(__file__), "..", "corpus", "runs")
   return sorted(glob.glob(os.path.join(root, "batch_*", "*.bin")))
 
 
@@ -131,19 +138,20 @@ def main():
         return
 
     print(f"{'file':<24}{'bytes':>9} {'error':<7}{'payl':>5}{'maxtext':>8}"
-          f"{'shrinks':>8}  rules")
+          f"{'shrinks':>8}  signals")
     for r in rows:
         print(f"{r['file']:<24}{r['bytes']:>9} {str(r['is_error']):<7}"
               f"{r['n_payloads']:>5}{r['max_text']:>8}{len(r['shrinks']):>8}"
-              f"  {','.join(r['rules'])}")
+              f"  {','.join(r['signals'])}")
 
     errs = [r for r in rows if r["is_error"]]
     oks = [r for r in rows if not r["is_error"]]
     print(f"\nERRORS {len(errs)}  CLEAN {len(oks)}")
     if errs:
-        print(f"\nerror runs and the rules that caught them:")
+        print("\nerror runs and the signal that caught each:")
         for r in errs:
-            print(f"  {r['file']:<24} {','.join(r['rules'])}")
+            print(f"  {r['file']:<24} {','.join(r['signals'])}  "
+                  f"{'; '.join(r['reasons'])}")
 
     if errs and oks:
         e = set().union(*[set(r["slots"]) for r in errs])
