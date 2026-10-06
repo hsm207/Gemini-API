@@ -11,6 +11,10 @@ STREAMING_FLAG_INDEX = 7
 GEM_FLAG_INDEX = 19
 TEMPORARY_CHAT_FLAG_INDEX = 45
 
+# Slot index and action id of the server's own "Try again" control.
+ACTION_CODE_INDEX = 63
+TRY_AGAIN_ACTION_CODE = 1001
+
 
 class Field(IntEnum):
     """Field numbers inside Gemini's JSPB arrays.

@@ -39,6 +39,7 @@ class Candidate(BaseModel):
 
     rcid: str
     text: str
+    is_error_card: bool = False
     text_delta: str | None = None
     thoughts: str | None = None
     thoughts_delta: str | None = None

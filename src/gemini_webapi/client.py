@@ -19,10 +19,13 @@ from curl_cffi.requests import AsyncSession, BrowserTypeLiteral, Cookies, Respon
 from curl_cffi.requests.exceptions import ReadTimeout
 
 from .components import ChatMixin, GemMixin, ResearchMixin
+from .error_card import is_error_card as _payload_is_error_card
 from .constants import (
+    ACTION_CODE_INDEX,
     ARTIFACTS_RE,
     BROWSER_TYPE,
     CARD_CONTENT_RE,
+    TRY_AGAIN_ACTION_CODE,
     DEFAULT_LANGUAGE,
     DEFAULT_METADATA,
     DEFAULT_PUSH_ID,
@@ -1225,31 +1228,120 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
         try:
             await self._sync_activity()
 
-            session_state = {
-                "last_texts": {},
-                "last_thoughts": {},
-            }
-            output = None
-            async for chunk in self._generate(
-                prompt=prompt,
-                req_file_data=file_data,
-                model=model,
-                gem=gem,
-                chat=chat,
-                temporary=temporary,
-                session_state=session_state,
-                deep_research=deep_research,
-                extended_thinking=extended_thinking,
-                **kwargs,
-            ):
-                output = chunk
+            max_error_card_retries = 3
+            last_error_output = None
+            # The loop rebinds `chat` on retry; keep the caller's object.
+            caller_chat = chat if isinstance(chat, ChatSession) else None
 
-            if output is None:
-                raise GeminiError("Failed to generate contents. No output data found in response.")
+            for retry_attempt in range(max_error_card_retries + 1):
+                # Per attempt: sharing it leaves the failed text in last_texts,
+                # so the recovered answer is diffed against the error message.
+                session_state = {
+                    "last_texts": {},
+                    "last_thoughts": {},
+                }
+                output = None
+                # A retry regenerates the failed turn in place: chat.rcid names
+                # the generation to redo, and slot 63 carries the action id the
+                # server's own "Try again" control sends. Without either the
+                # retry counts as a new question. Never sent on attempt 1.
+                async for chunk in self._generate(
+                    prompt=prompt,
+                    req_file_data=file_data,
+                    model=model,
+                    gem=gem,
+                    chat=chat,
+                    temporary=temporary,
+                    session_state=session_state,
+                    deep_research=deep_research,
+                    extended_thinking=extended_thinking,
+                    action_code=TRY_AGAIN_ACTION_CODE if retry_attempt > 0 else None,
+                    **kwargs,
+                ):
+                    output = chunk
+
+                if output is None:
+                    raise GeminiError("Failed to generate contents. No output data found in response.")
+
+                has_error_card = any(
+                    getattr(cand, "is_error_card", False) for cand in output.candidates
+                )
+                if has_error_card:
+                    last_error_output = output
+                    if retry_attempt < max_error_card_retries:
+                        # cid/rcid let the failed turn be matched to its
+                        # conversation in the gemini.google.com web UI.
+                        failed_candidate = next(
+                            (
+                                cand
+                                for cand in output.candidates
+                                if getattr(cand, "is_error_card", False)
+                            ),
+                            None,
+                        )
+                        failed_rcid = getattr(failed_candidate, "rcid", None)
+                        failed_text = (getattr(failed_candidate, "text", "") or "").strip()
+                        # cid comes from the response metadata, so it is available
+                        # before the chat object has been assigned.
+                        failed_cid = output.metadata[0] if output.metadata else None
+                        logger.warning(
+                            "Google returned transient error card "
+                            f"(cid={failed_cid}, failed_rcid={failed_rcid}, "
+                            f"attempt {retry_attempt + 1}/{max_error_card_retries}). "
+                            f"Card text: {failed_text!r}. Retrying..."
+                        )
+                        chat = ChatSession(
+                            geminiclient=self,
+                            metadata=list(output.metadata),
+                        )
+                        if failed_rcid:
+                            chat.rcid = failed_rcid
+                        # Failures cluster, so back off: 1s, 2s, 4s.
+                        await asyncio.sleep(2**retry_attempt)
+                        continue
+                    else:
+                        exhausted_cid = output.metadata[0] if output.metadata else None
+                        exhausted_rcid = next(
+                            (
+                                getattr(cand, "rcid", None)
+                                for cand in output.candidates
+                                if getattr(cand, "rcid", None)
+                            ),
+                            None,
+                        )
+                        logger.warning(
+                            "Google returned transient error card after maximum "
+                            f"retries (cid={exhausted_cid}, failed_rcid={exhausted_rcid}). "
+                            "Returning last error message."
+                        )
+                        break
+                else:
+                    if retry_attempt > 0:
+                        # Pairs with the warning above: the rcid of the variant
+                        # that replaced the failed one.
+                        recovered_rcid = next(
+                            (
+                                getattr(cand, "rcid", None)
+                                for cand in output.candidates
+                                if getattr(cand, "rcid", None)
+                            ),
+                            None,
+                        )
+                        logger.info(
+                            "Error card recovered after "
+                            f"{retry_attempt} retry(ies): cid={output.metadata[0] if output.metadata else None}, "
+                            f"new_rcid={recovered_rcid}, "
+                            f"answer={((output.text or '').strip())[:60]!r}"
+                        )
+                    break
+
+            if output is None and last_error_output is not None:
+                output = last_error_output
 
             if isinstance(chat, ChatSession):
                 output.metadata = chat.metadata
-                chat.last_output = output
+            if caller_chat is not None:
+                caller_chat.last_output = output
 
             return output
 
@@ -1385,6 +1477,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
         session_state: dict[str, Any] | None = None,
         deep_research: bool = False,
         extended_thinking: bool = False,
+        action_code: int | None = None,
         **kwargs,
     ) -> AsyncGenerator[ModelOutput, None]:
         """Internal method which actually sends content generation requests.
@@ -1503,6 +1596,8 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 inner_req_list[61] = []
                 inner_req_list[79] = 1
                 inner_req_list[80] = 2 if extended_thinking else 1
+                if action_code is not None:
+                    inner_req_list[ACTION_CODE_INDEX] = [action_code, None, 0]
 
                 uuid_val = str(uuid.uuid4()).upper()
 
@@ -1689,9 +1784,14 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                                 generated_videos,
                                                 generated_media,
                                                 citations,
+                                                is_error_card,
                                             ) = self._parse_candidate(
                                                 candidate_data, cid, rid, rcid
                                             )
+                                            if not is_error_card:
+                                                is_error_card = _payload_is_error_card(
+                                                    part_json, text
+                                                )
 
                                             deep_research_plan = None
                                             deep_research_document = None
@@ -1820,6 +1920,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                                                     citations=citations,
                                                     deep_research_plan=deep_research_plan,
                                                     deep_research_document=deep_research_document,
+                                                    is_error_card=is_error_card,
                                                 )
                                             )
 
@@ -2114,9 +2215,12 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 - citations: Web sources resolving the `[cite: N]` markers in the text.
 
         """
-        text = get_nested_value(candidate_data, [1, 0], "")
-        if CARD_CONTENT_RE.match(text):
-            text = get_nested_value(candidate_data, [22, 0]) or text
+        raw_text = get_nested_value(candidate_data, [1, 0], "")
+        is_error_card = bool(CARD_CONTENT_RE.match(raw_text))
+        if is_error_card:
+            text = get_nested_value(candidate_data, [22, 0]) or raw_text
+        else:
+            text = raw_text
 
         # Cleanup googleusercontent artifacts
         text = ARTIFACTS_RE.sub("", text)
@@ -2240,6 +2344,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             generated_videos,
             generated_media,
             citations,
+            is_error_card,
         )
 
     async def _get_full_size_image(
